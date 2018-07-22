@@ -15,5 +15,3 @@ pub use self::chip8::*;
 pub use self::hardware::*;
 pub use self::memory::*;
 pub use self::drivers::*;
-
-// pub mod chip8_old;
