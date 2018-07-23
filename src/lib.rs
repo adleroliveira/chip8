@@ -9,9 +9,11 @@ pub mod chip8;
 pub mod hardware;
 pub mod memory;
 pub mod drivers;
+pub mod debugger;
 
 pub use self::cpu::*;
 pub use self::chip8::*;
 pub use self::hardware::*;
 pub use self::memory::*;
 pub use self::drivers::*;
+pub use self::debugger::*;

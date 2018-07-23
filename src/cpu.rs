@@ -3,6 +3,7 @@ use memory::Memory;
 use hardware::KeyboardDriver;
 use std::sync::{Arc, Mutex};
 use rand::{self, Rng};
+use debugger::{Debugger, DebugMode};
 
 pub enum Action {
     Next,
@@ -23,6 +24,7 @@ pub struct Cpu {
     pub halt: bool,
     pub keypad_waiting: bool,
     pub keypad_register: u8,
+    pub steps: usize,
 }
 
 impl Cpu {
@@ -39,12 +41,7 @@ impl Cpu {
             keypad_waiting: false,
             keypad_register: 0,
             debug: false,
-        }
-    }
-
-    pub fn debug(&self, data: &str) {
-        if self.debug {
-            println!("{:?}", data);
+            steps: 0,
         }
     }
 
@@ -53,17 +50,18 @@ impl Cpu {
         (memory.ram[self.pc as usize] as u16) << 8 | (memory.ram[(self.pc + 1) as usize] as u16)
     }
 
-    pub fn tick<K>(&mut self, keyboard: &K) where K: KeyboardDriver {
+    pub fn tick<K>(&mut self, keyboard: &K, debugger: &Debugger) where K: KeyboardDriver {
         if !self.halt {
+            if self.delay_timer > 0 {
+                self.delay_timer -= 1
+            }
+
             if !self.keypad_waiting {
-                if self.delay_timer > 0 {
-                    self.delay_timer -= 1
-                }
                 if self.sound_timer > 0 {
                     self.sound_timer -= 1
                 }
                 let opcode = self.opcode();
-                self.run_opcode(opcode, keyboard);
+                self.run_opcode(opcode, keyboard, debugger);
             } else {
                 // println!("Waiting for key");
                 let key = keyboard.get_key();
@@ -75,8 +73,11 @@ impl Cpu {
         }
     }
 
-    pub fn run_opcode<K>(&mut self, opcode: u16, keyboard: &K) where K: KeyboardDriver {
-        // println!("OPCODE 0x{:X}", opcode);
+    pub fn run_opcode<K>(&mut self, opcode: u16, keyboard: &K, debugger: &Debugger) where K: KeyboardDriver {
+        self.steps += 1;
+        if debugger.mode != DebugMode::Disabled {
+            debugger.debug(&self, opcode);
+        }
 
         let nibbles = (
             ((opcode & 0xF000) >> 12) as u8,
@@ -147,7 +148,6 @@ impl Cpu {
     }
 
     pub fn op_00e0(&mut self) -> Action {
-        self.debug("CLS");
         let mut mem = self.memory.lock().unwrap();
         mem.vram = [[0; CHIP8_WIDTH]; CHIP8_HEIGHT];
         mem.vram_changed = true;
@@ -158,17 +158,14 @@ impl Cpu {
         let memory = self.memory.lock().unwrap();
         self.sp -= 1;
         self.pc = memory.stack[self.sp as usize];
-        self.debug(&format!("RET 0x{:X}", self.pc));
         Action::Next
     }
 
     pub fn op_1nnn(&mut self, nnn: u16) -> Action {
-        self.debug(&format!("JP 0x{:X}", nnn));
         Action::Jump(nnn)
     }
 
     pub fn op_2nnn(&mut self, nnn: u16) -> Action {
-        self.debug(&format!("CALL 0x{:X}", nnn));
         let mut memory = self.memory.lock().unwrap();
         memory.stack[self.sp as usize] = self.pc;
         self.sp += 1;
@@ -176,7 +173,6 @@ impl Cpu {
     }
 
     pub fn op_3xkk(&mut self, x: usize, kk: u8) -> Action {
-        self.debug(&format!("SE V{:?} [0x{:X} ({:?})] 0x{:X} ({:?})", x, self.v[x], self.v[x], kk, kk));
         if self.v[x] == kk {
             Action::Skip
         } else {
@@ -185,7 +181,6 @@ impl Cpu {
     }
 
     pub fn op_4xkk(&mut self, x: usize, kk: u8) -> Action {
-        self.debug(&format!("SNE V{:?} 0x{:X}", x, kk));
         if self.v[x] != kk {
             Action::Skip
         } else {
@@ -194,7 +189,6 @@ impl Cpu {
     }
 
     pub fn op_5xy0(&mut self, x: usize, y: usize) -> Action {
-        self.debug(&format!("SE V{:?} V{:?}", x, y));
         if self.v[x] == self.v[y] {
             Action::Skip
         } else {
@@ -203,43 +197,36 @@ impl Cpu {
     }
 
     pub fn op_6xkk(&mut self, x: usize, kk: u8) -> Action {
-        self.debug(&format!("LD V{:?} 0x{:X} ({:?})", x, kk, kk));
         self.v[x] = kk;
         Action::Next
     }
 
     pub fn op_7xkk(&mut self, x: usize, kk: u8) -> Action {
-        self.debug(&format!("ADD V{:?} 0x{:X}", x, kk));
         self.v[x] = self.v[x].wrapping_add(kk);
         Action::Next
     }
 
     pub fn op_8xy0(&mut self, x: usize, y: usize) -> Action {
-        self.debug(&format!("LD V{:?} V{:?}", x, y));
         self.v[x] = self.v[y];
         Action::Next
     }
 
     pub fn op_8xy1(&mut self, x: usize, y: usize) -> Action {
-        self.debug(&format!("OR V{:?} V{:?}", x, y));
         self.v[x] = self.v[x] | self.v[y];
         Action::Next
     }
 
     pub fn op_8xy2(&mut self, x: usize, y: usize) -> Action {
-        self.debug(&format!("AND V{:?} V{:?}", x, y));
         self.v[x] = self.v[x] & self.v[y];
         Action::Next
     }
 
     pub fn op_8xy3(&mut self, x: usize, y: usize) -> Action {
-        self.debug(&format!("XOR V{:?} V{:?}", x, y));
         self.v[x] = self.v[x] ^ self.v[y];
         Action::Next
     }
 
     pub fn op_8xy4(&mut self, x: usize, y: usize) -> Action {
-        self.debug(&format!("ADD V{:?} V{:?}", x, y));
         let vx = self.v[x] as u16;
         let vy = self.v[y] as u16;
         let result = vx + vy;
@@ -249,14 +236,12 @@ impl Cpu {
     }
 
     pub fn op_8xy5(&mut self, x: usize, y: usize) -> Action {
-        self.debug(&format!("SUB V{:?} V{:?}", x, y));
         self.v[0xF] = if self.v[x] > self.v[y] { 1 } else { 0 };
         self.v[x] = self.v[x].wrapping_sub(self.v[y]);
         Action::Next
     }
 
     pub fn op_8xy6(&mut self, x: usize, _y: usize) -> Action {
-        self.debug(&format!("SHR V{:?}", x));
         self.v[0xF] = self.v[x] & 0x1;
         self.v[x] >>= 1;
         Action::Next
@@ -285,7 +270,6 @@ impl Cpu {
     }
 
     pub fn op_annn(&mut self, nnn: u16) -> Action {
-        self.debug(&format!("LDI 0x{:X} ({:?})", nnn, nnn));
         self.i = nnn;
         Action::Next
     }
@@ -296,23 +280,26 @@ impl Cpu {
 
     pub fn op_cxkk(&mut self, x: usize, kk: u8) -> Action {
         let mut rng = rand::thread_rng();
-        self.v[x] = rng.gen::<u8>() & kk;
+        let rnd = rng.gen::<u8>();
+        self.v[x] = (rnd as u8 & kk) as u8;
         Action::Next
     }
 
     pub fn op_dxyn(&mut self, x: usize, y: usize, n: usize) -> Action {
-        self.debug(&format!("DRW V{:?} V{:?} {:X} ({:?})", x, y, n, n));
         let mut memory = self.memory.lock().unwrap();
+        self.v[0xF] = 0;
+        println!("I: {:?}", self.i);
         for byte in 0..n as usize {
-            let y = (self.v[y] as usize + byte) % CHIP8_HEIGHT;
+            let coord_y = (self.v[y] as usize + byte) % CHIP8_HEIGHT;
             for bit in 0..8 {
-                let x = (self.v[x].wrapping_add(bit)) as usize % CHIP8_WIDTH;
+                let coord_x = (self.v[x].wrapping_add(bit)) as usize % CHIP8_WIDTH;
                 let color = (memory.ram[self.i as usize + byte] >> (7 - bit)) & 1;
-                self.v[0xF] |= color & memory.vram[y][x];
-                memory.vram[y][x] ^= color;
+                self.v[0xF] |= color & memory.vram[coord_y][coord_x];
+                print!("{:?}", color ^ memory.vram[coord_y][coord_x]);
+                memory.vram[coord_y][coord_x] = color ^ memory.vram[coord_y][coord_x];
             }
+            println!("");
         }
-        memory.vram_changed = true;
         Action::Next
     }
 

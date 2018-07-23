@@ -1,12 +1,13 @@
 use std::sync::{Arc, Mutex};
 use hardware::{AudioDriver, KeyboardDriver};
 use memory::Memory;
+use debugger::{Debugger, DebugMode};
 use cpu::Cpu;
 use glutin_window::GlutinWindow as Window;
 use piston::window::WindowSettings;
 use piston::event_loop::{Events, EventSettings, EventLoop};
 use opengl_graphics::{OpenGL, GlGraphics};
-use piston::input::{RenderEvent, RenderArgs, Button, ButtonState, ButtonEvent, Key}; // self, Button, Event, Input, 
+use piston::input::{RenderEvent, RenderArgs, Button, ButtonState, ButtonEvent, Key, UpdateEvent}; // self, Button, Event, Input, 
 use graphics::{self, Transformed};
 
 pub const FONT_SET: [u8; 80] = 
@@ -32,8 +33,10 @@ pub const FONT_SET: [u8; 80] =
 pub const OPCODE_SIZE: u16 = 2;
 pub const CHIP8_WIDTH: usize = 64;
 pub const CHIP8_HEIGHT: usize = 32;
-pub const CLOCK_FREQ: u64 = 2;
+pub const CLOCK_FREQ: u64 = 512;
 pub const SCALE: usize = 10;
+pub const BACKGROUND: [f32; 4] = [0.3, 0.3, 0.3, 1.0];
+pub const FOREGROUND: [f32; 4] = [1.0, 0.13, 0.43, 1.0];
 
 pub struct Chip8<A, K>
     where
@@ -41,14 +44,13 @@ pub struct Chip8<A, K>
         K: KeyboardDriver + Sync + Send,
 {
     pub memory: Arc<Mutex<Memory>>,
-    pub cpu: Cpu,
+    pub cpu: Arc<Mutex<Cpu>>,
     pub keyboard: K,
     pub audio: A,
     pub clock: u64,
     pub gfx: GlGraphics,
     pub window: Window,
-    pub program: Vec<u8>,
-    pub debug: bool,
+    pub debugger: Debugger,
 }
 
 impl<A: 'static, K: 'static> Chip8<A, K>
@@ -58,9 +60,8 @@ impl<A: 'static, K: 'static> Chip8<A, K>
 {
     pub fn new(audio: A, keyboard: K) -> Self {
         let memory = Arc::new(Mutex::new(Memory::new()));
-        let cpu = Cpu::new(memory.clone());
+        let cpu = Arc::new(Mutex::new(Cpu::new(memory.clone())));
         let clock = 1000 / CLOCK_FREQ;
-
         let opengl = OpenGL::V3_2;
         let width = CHIP8_WIDTH * SCALE;
         let height = CHIP8_HEIGHT * SCALE;
@@ -68,12 +69,12 @@ impl<A: 'static, K: 'static> Chip8<A, K>
         let window: Window = WindowSettings::new("Chip8", [width as u32, height as u32])
             .opengl(opengl)
             .exit_on_esc(true)
+            .vsync(true)
             .build()
             .unwrap();
 
+        let debugger = Debugger::new(cpu.clone(), memory.clone());
         let gfx = GlGraphics::new(opengl);
-        let program = Vec::new();
-        let debug = false;
 
         Chip8 {
             memory,
@@ -83,78 +84,71 @@ impl<A: 'static, K: 'static> Chip8<A, K>
             clock,
             gfx,
             window,
-            debug,
-            program,
+            debugger,
         }
     }
-
-    pub fn toggle_debuger(&mut self) {
-        self.debug = !self.debug;
-        self.cpu.debug = !self.cpu.debug;
-    }
-
 
     pub fn load_program(&mut self, program: &[u8]) {
         if program.len() > (4096 - 512) {
             panic!("This program is too big to run in this interpreter");
         }
-        self.program = program.to_vec();
+        self.debugger.program = program.to_vec();
         let mut memory = self.memory.lock().unwrap();
         for addr in 0..program.len() {
             let offset = 0x200;
             memory.ram[addr + offset] = program[addr];
-            // if (addr + offset) & 1 == 0 && addr + 1 < program.len()  {
-            //     let opcode = (program[addr] as u16) << 8 | (program[addr + 1] as u16);
-            //     println!("0x{:X}: {:X}", 0x200 + addr, opcode);
-            // }
         }
 
         println!("{:#} bytes loaded to memory..", program.len());
     }
 
-    // pub fn render(&mut self, cxt: [[f64; 3]; 2], gfx: &mut GlGraphics) {
     pub fn render(&mut self, args: &RenderArgs) {
-        let memory = self.memory.lock().unwrap();
+        let mut memory = self.memory.lock().unwrap();
 
-        const BACKGROUND: [f32; 4] = [0.3, 0.3, 0.3, 1.0];
-        const FOREGROUND: [f32; 4] = [1.0, 0.13, 0.43, 1.0];
+        // if memory.vram_changed {
+            memory.vram_changed = false;
+            self.gfx.draw(args.viewport(), |_ctx, gfx| {
+                graphics::clear(BACKGROUND, gfx);
+            });
 
-        self.gfx.draw(args.viewport(), |_ctx, gfx| {
-            graphics::clear(BACKGROUND, gfx);
-        });
+            let square = graphics::rectangle::square(0.0, 0.0, SCALE as f64);
 
-
-        let square = graphics::rectangle::square(0.0, 0.0, SCALE as f64);
-
-        for y in 0..CHIP8_HEIGHT {
-            for x in 0..CHIP8_WIDTH {
-                let pos_x = x * SCALE;
-                let pos_y = y * SCALE;
-                if memory.vram[y][x] == 1 {
-                    self.gfx.draw(args.viewport(), |c, gfx| {
-                        graphics::rectangle(FOREGROUND, square, c.transform.trans(pos_x as f64, pos_y as f64), gfx);
-                    })
+            self.gfx.draw(args.viewport(), |c, gfx| {
+                for y in 0..CHIP8_HEIGHT {
+                    for x in 0..CHIP8_WIDTH {
+                        let pos_x = x * SCALE;
+                        let pos_y = y * SCALE;
+                        if memory.vram[y][x] == 1 {
+                            graphics::rectangle(FOREGROUND, square, c.transform.trans(pos_x as f64, pos_y as f64), gfx);
+                        }
+                    }
                 }
-            }
-        }
+            })
+        // }
     }
 
     pub fn boot(&mut self) {
         println!("Booting Chip8..");
 
-        let mut events = Events::new(EventSettings::new()).ups(self.clock);
+        let mut events = Events::new(EventSettings::new()).ups(180);
 
         while let Some(e) = events.next(&mut self.window) {
             if let Some(args) = e.render_args() {
                 self.render(&args);
             }
 
-            if !self.debug {
-                self.cpu.tick(&self.keyboard);
+            if let Some(_u) = e.update_args() {
+                if self.debugger.mode != DebugMode::Step {
+                    let mut cpu = self.cpu.lock().unwrap();
+                    cpu.tick(&self.keyboard, &self.debugger);
+                }
             }
 
             if let Some(k) = e.button_args() {
                 if k.state == ButtonState::Press || k.state == ButtonState::Release {
+                    if k.state == ButtonState::Press {
+                        self.debugger.input_key(&k.button, &self.keyboard);
+                    }
                     let index = match &k.button {
                         &Button::Keyboard(Key::D1)  => Some(0x1),
                         &Button::Keyboard(Key::D2)  => Some(0x2),
@@ -172,34 +166,6 @@ impl<A: 'static, K: 'static> Chip8<A, K>
                         &Button::Keyboard(Key::X)   => Some(0x0),
                         &Button::Keyboard(Key::C)   => Some(0xb),
                         &Button::Keyboard(Key::V)   => Some(0xf),
-                        &Button::Keyboard(Key::N)   => {
-                            if k.state == ButtonState::Press && self.debug {
-                                self.cpu.tick(&self.keyboard);
-                            }
-                            None
-                        }
-                        &Button::Keyboard(Key::P) if k.state == ButtonState::Press  => {
-                            self.toggle_debuger();
-                            None
-                        }
-                        &Button::Keyboard(Key::M) if k.state == ButtonState::Press  => {
-                            let memory = self.memory.lock().unwrap();
-                            for i in 0..memory.ram.len() {
-                                println!("0x{:X}: {:X}", i, memory.ram[i]);
-                            }
-                            None
-                        }
-                        &Button::Keyboard(Key::O) if k.state == ButtonState::Press  => {
-                            let program = &self.program;
-                            for addr in 0..program.len() {
-                                let offset = 0x200;
-                                if (addr + offset) & 1 == 0 && addr + 1 < program.len()  {
-                                    let opcode = (program[addr] as u16) << 8 | (program[addr + 1] as u16);
-                                    println!("0x{:X}: {:X}", 0x200 + addr, opcode);
-                                } 
-                            }
-                            None
-                        }
                         _ => None,
                     };
 

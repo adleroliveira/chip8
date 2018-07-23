@@ -24,7 +24,7 @@ fn main() {
 
     f.read_to_end(&mut rom).expect("failed to read .rom file");
     let mut vm = Chip8::new(Audio {}, Keyboard::new());
-    vm.toggle_debuger();
+
     vm.load_program(&rom);
     vm.boot();
 }
